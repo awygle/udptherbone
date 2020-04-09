@@ -1,0 +1,1 @@
+An implementation of EtherBone (https://www.ohwr.org/project/etherbone-core/uploads/31c96b68f85d27fd5199dfc6d6443a08/spec.pdf) over UDP over SLIP. The intention is to allow a simple way to issue Wishbone transactions on an embedded bus over a UART connection using existing softwear whereever possible.
