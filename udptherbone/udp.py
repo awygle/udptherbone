@@ -1,7 +1,7 @@
 
 from nmigen import *
 from nmigen.lib.fifo import SyncFIFO
-from nmigen.lib.stream import *
+from .stream import *
 
 import enum
 import ipaddress
