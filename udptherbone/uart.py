@@ -1,5 +1,5 @@
 from nmigen import *
-from nmigen.lib.stream import *
+from .stream import *
 
 import enum
 
