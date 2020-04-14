@@ -1,7 +1,7 @@
 
 from nmigen import *
 from nmigen.lib.fifo import SyncFIFO
-from nmigen.lib.stream import *
+from .stream import *
 
 SLIP_END = C(0xC0, 8)
 SLIP_ESC = C(0xDB, 8)
