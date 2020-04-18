@@ -22,7 +22,7 @@ class SLIPFramer(Elaboratable):
         assert input.eop_enabled
         
         self._input = input
-        self.sink = StreamSink.from_source(input, name="slip_sink")
+        self.sink = StreamSink.from_source(input, name="unslip_sink")
         self.source = StreamSource(Layout([("data", 8, DIR_FANOUT)]), sop=False, eop=False, name="slip_source")
         
         self.err  = Signal()
@@ -33,25 +33,26 @@ class SLIPFramer(Elaboratable):
         
         m = Module()
         
-        we = Signal()
-        m.d.comb += we.eq(sink.valid & sink.ready)
-        re = Signal()
-        m.d.comb += re.eq(source.valid & source.ready)
-        
         stalled = Signal()
         
-        m.submodules.buffer = buff = SyncFIFOStream(payload_type=Layout([("data", 8)]), depth=4)
-        m.d.comb += self.sink.ready.eq(buff.sink.ready & ~stalled)
-        m.d.comb += buff.sink.valid.eq(self.sink.valid)
+        m.submodules.buffer = buff = SyncFIFO(width=8, depth=4)
         
-        m.d.comb += self.sink.connect(self._input)
+        m.d.comb += sink.ready.eq(buff.w_rdy & ~stalled)
+        m.d.comb += buff.w_en.eq(sink.we)
+        
+        # this should be a "connect" call
         m.d.comb += [
-                buff.sink.data.eq(self.sink.data),
+                sink.eop.eq(self._input.eop),
+                sink.sop.eq(self._input.sop),
+                sink.valid.eq(self._input.valid),
+                self._input.ready.eq(self.sink.ready),
+                sink.data.eq(self._input.data),
                 ]
+        
         m.d.comb += [
-                self.source.data.eq(buff.source.data),
-                self.source.valid.eq(buff.source.valid),
-                buff.source.ready.eq(self.source.ready)
+                source.data.eq(buff.r_data),
+                source.valid.eq(buff.r_rdy),
+                buff.r_en.eq(source.re)
                 ]
         
         escapable = Signal()
@@ -62,7 +63,8 @@ class SLIPFramer(Elaboratable):
         with m.FSM():
             with m.State("ACTIVE"):
                 m.d.sync += stalled.eq(0)
-                with m.If(we):
+                m.d.comb += buff.w_data.eq(Mux(escapable, SLIP_ESC, sink.data))
+                with m.If(sink.we):
                     with m.Switch(Cat(self.sink.eop, escapable)):
                         with m.Case(0b00):
                             # not EOP, not escapable
@@ -76,137 +78,212 @@ class SLIPFramer(Elaboratable):
                         with m.Case(0b10):
                             # not EOP, escapable
                             # escape, dump to skid, stall for one cycle
-                            m.d.sync += escaped.eq(self._input.data)
-                            m.d.comb += buff.sink.data.eq(SLIP_ESC)
+                            m.d.sync += escaped.eq(sink.data)
                             m.d.sync += stalled.eq(1)
                             m.next = "ESC"
                         with m.Case(0b11):
                             # EOP, escapable
                             # escape, dump to skid, stall for two cycles while ending packet
                             m.d.sync += escaped.eq(self._input.data)
-                            m.d.comb += buff.sink.data.eq(SLIP_ESC)
                             m.d.sync += stalled.eq(1)
                             m.next = "ESC_END"
                         
             with m.State("END"):
                 # end only
-                m.d.comb += buff.sink.data.eq(SLIP_END)
-                m.d.comb += buff.sink.valid.eq(1)
-                with m.If(buff.sink.ready):
+                m.d.comb += buff.w_data.eq(SLIP_END)
+                m.d.comb += buff.w_en.eq(1)
+                with m.If(buff.w_rdy):
                     m.d.sync += stalled.eq(0)
                     m.next = "ACTIVE"
                 
             with m.State("ESC"):
                 # escape only
                 with m.If(escaped == SLIP_END):
-                    m.d.comb += buff.sink.data.eq(SLIP_ESC_END)
+                    m.d.comb += buff.w_data.eq(SLIP_ESC_END)
                 with m.If(escaped == SLIP_ESC):
-                    m.d.comb += buff.sink.data.eq(SLIP_ESC_ESC)
+                    m.d.comb += buff.w_data.eq(SLIP_ESC_ESC)
                 with m.Else():
-                    # TODO assert this can't happen
-                    pass
-                m.d.comb += buff.sink.valid.eq(1)
-                with m.If(buff.sink.ready):
+                    # TODO assert this can't happen?
+                    m.d.sync += self.err.eq(1)
+                    m.next = "ACTIVE"
+                m.d.comb += buff.w_en.eq(1)
+                with m.If(buff.w_rdy):
                     m.d.sync += stalled.eq(0)
                     m.next = "ACTIVE"
                 
             with m.State("ESC_END"):
                 # escape, then end
                 with m.If(escaped == SLIP_END):
-                    m.d.comb += buff.sink.data.eq(SLIP_ESC_END)
+                    m.d.comb += buff.w_data.eq(SLIP_ESC_END)
                 with m.If(escaped == SLIP_ESC):
-                    m.d.comb += buff.sink.data.eq(SLIP_ESC_ESC)
+                    m.d.comb += buff.w_data.eq(SLIP_ESC_ESC)
                 with m.Else():
-                    # TODO assert this can't happen
-                    pass
-                m.d.comb += buff.sink.valid.eq(1)
-                with m.If(buff.sink.ready):
+                    # TODO assert this can't happen?
+                    m.d.sync += self.err.eq(1)
+                    m.next = "ACTIVE"
+                m.d.comb += buff.w_en.eq(1)
+                with m.If(buff.w_rdy):
                     m.d.sync += stalled.eq(1) # remain stalled
                     m.next = "END"
                         
         return m
-    
-if __name__ == "__main__":
-    input = i = StreamSource(Layout([("data", 8, DIR_FANOUT)]), name="input")
-    wiggle = Signal()
-    framer = f = SLIPFramer(input)
-    
-    ports = []
 
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    p_action = parser.add_subparsers(dest="action")
-    p_action.add_parser("simulate")
-    p_action.add_parser("generate")
-
-    args = parser.parse_args()
-    if args.action == "simulate":
-        from nmigen.back.pysim import Simulator, Passive
-
-        sim = Simulator(framer)
-        sim.add_clock(1e-6)
+class SLIPUnframer(Elaboratable):
+    """
+    TODO formal docstring
+    Input: stream with framing
+    Output: stream without framing
+    Parameter: none?
+    Control signals: error
+    """
+    def __init__(self, input: StreamSource):
+        assert Record(input.payload_type).shape().width == 8
+        assert not input.sop_enabled
+        assert not input.eop_enabled
         
-        def transmit_proc():
-            yield
-            g = 0
-            d = "hel\xc0\xc0lo world\xdb"
-            m = len(d)
-            while g < m:
-                c = d[g]
-                yield i.data.eq(ord(c))
-                yield i.sop.eq(0)
-                yield i.eop.eq(0)
-                if c == 'h':
-                    yield i.sop.eq(1)
-                elif c == ' ':
-                    yield i.eop.eq(1)
-                elif c == 'w':
-                    yield i.sop.eq(1)
-                elif c == '\xdb':
-                    yield i.eop.eq(1)
-                yield i.valid.eq(1)
-                yield
-                print("writing " + str(hex((yield f.sink.data))) + \
-                    ", ready is " + str((yield f.sink.ready)) + \
-                    ", valid is " + str((yield f.sink.valid)))
-                if (yield f.sink.ready) == 1:
-                    g += 1
-            for g in range(0, 16):
-                yield i.valid.eq(0)
-                yield
+        self._input = input
+        self.sink = StreamSink.from_source(input, name="slip_sink")
+        self.source = StreamSource(Layout([("data", 8, DIR_FANOUT)]), sop=True, eop=True, name="unslip_source")
         
-        def receive_proc():
-            for g in range(0, 16):
-                yield
-            data = []
-            yield f.source.ready.eq(1)
-            yield
-            #for g in range(0, 128):
-            while not (yield f.source.valid) == 0:
-                if (yield f.source.valid) == 1:
-                    data.append((yield f.source.data))
-                    print("reading " + str(hex((yield f.source.data))) + \
-                        ", ready is " + str((yield f.source.ready)) + \
-                        ", valid is " + str((yield f.source.valid)))
-                yield
+        self.err  = Signal()
+        
+    def elaborate(self, platform):
+        sink = self.sink
+        source = self.source
+        
+        m = Module()
+        
+        # input <-> sink <-> buff <-> source
+        m.submodules.buff = buff = SyncFIFO(width=8, depth=2, fwft=True)
+        
+        stalled = Signal()
+        
+        # input <-> sink
+        m.d.comb += [
+                sink.valid.eq(self._input.valid),
+                sink.data.eq(self._input.data),
+                ]
+        
+        # sink <-> buff
+        m.d.comb += [
+                sink.ready.eq(buff.w_rdy),
+                buff.w_data.eq(sink.data),
+                buff.w_en.eq(sink.we),
+                ]
+        
+        # buff <-> source
+        m.d.comb += [
+                source.valid.eq(buff.r_rdy & ~stalled),
+                buff.r_en.eq(source.re | stalled),
+                ]
             
-            print(list(map(hex, data)))
-            print(list(map(chr, data)))
-
-        sim.add_sync_process(transmit_proc)
-        sim.add_sync_process(receive_proc)
+        escape = Signal()
+        escaped = Signal()
+        end = Signal()
+        input_end = Signal()
+        m.d.comb += [
+                escape.eq(buff.r_data == SLIP_ESC),
+                end.eq(buff.r_data == SLIP_END),
+                input_end.eq(buff.w_data == SLIP_END),
+                ]
         
-        with sim.write_vcd("slip.vcd", "slip.gtkw"):
-            sim.run()
-
-    if args.action == "generate":
-        from nmigen.back import verilog
-
-        print(verilog.convert(packetizer, ports=ports))
+        m.d.sync += self.err.eq(0)
         
-    if args.action == "program":
-        platform = VersaECP5Platform()
-        platform.build(packetizer, do_program=True)
-    
+        with m.FSM():
+            with m.State("INIT"):
+                m.d.comb += source.data.eq(buff.r_data) # no case where this isn't OK
+                with m.Switch(buff.r_data):
+                    with m.Case(SLIP_ESC.value):
+                        m.d.comb += source.eop.eq(0)
+                        with m.If((buff.w_data == SLIP_ESC_ESC) | (buff.w_data == SLIP_ESC_END)):
+                            # legal. go to escape state, drop this input
+                            m.d.comb += stalled.eq(1)
+                            with m.If(sink.we):
+                                m.next = "ESCAPED_INIT"
+                        with m.Else():
+                            # illegal. pulse error, stay here
+                            m.d.comb += stalled.eq(1)
+                            m.d.sync += self.err.eq(1)
+                            with m.If(sink.we):
+                                m.next = "INIT" # for clarity
+                    with m.Case(SLIP_END.value):
+                        # we can ignore this, it's an empty packet
+                        m.d.comb += source.eop.eq(0)
+                        m.d.comb += stalled.eq(1)
+                        with m.If(sink.we):
+                            m.next = "INIT" # for clarity
+                    with m.Default():
+                        # normal stuff, set SOP, advance to ACTIVE
+                        m.d.comb += source.sop.eq(1)
+                        with m.If(buff.w_data == SLIP_END):
+                            m.d.comb += source.eop.eq(1)
+                        with m.Else():
+                            m.d.comb += source.eop.eq(0)
+                        with m.If(sink.we):
+                            m.next = "ACTIVE"
+            with m.State("ACTIVE"):
+                m.d.comb += source.data.eq(buff.r_data) # no case where this isn't OK
+                m.d.comb += source.sop.eq(0)
+                with m.Switch(buff.r_data):
+                    with m.Case(SLIP_ESC.value):
+                        m.d.comb += source.eop.eq(0)
+                        with m.If((buff.w_data == SLIP_ESC_ESC) | (buff.w_data == SLIP_ESC_END)):
+                            # legal. go to escape state, drop this input
+                            m.d.comb += stalled.eq(1)
+                            with m.If(sink.we):
+                                m.next = "ESCAPED"
+                        with m.Else():
+                            # illegal. pulse error, reset
+                            m.d.comb += stalled.eq(1)
+                            m.d.sync += self.err.eq(1)
+                            with m.If(sink.we):
+                                m.next = "INIT"
+                    with m.Case(SLIP_END.value):
+                        # we already set EOP last time through, skip + reset
+                        m.d.comb += source.eop.eq(0)
+                        m.d.comb += stalled.eq(1)
+                        with m.If(sink.we):
+                            m.next = "INIT"
+                    with m.Default():
+                        # normal stuff, stay here
+                        with m.If(buff.w_data == SLIP_END):
+                            m.d.comb += source.eop.eq(1)
+                        with m.Else():
+                            m.d.comb += source.eop.eq(0)
+                        with m.If(sink.we):
+                            m.next = "ACTIVE" # for clarity
+            with m.State("ESCAPED"):
+                m.d.comb += stalled.eq(0)
+                m.d.comb += source.sop.eq(0)
+                m.d.comb += source.eop.eq(0)
+                with m.If(sink.we):
+                    m.next = "ACTIVE" # always true
+                with m.Switch(buff.r_data):
+                    with m.Case(SLIP_ESC_ESC.value):
+                        m.d.comb += source.data.eq(SLIP_ESC)
+                    with m.Case(SLIP_ESC_END.value):
+                        m.d.comb += source.data.eq(SLIP_END)
+                    with m.Default():
+                        # should never happen but pulse err anyway i guess
+                        m.d.sync += self.err.eq(1)
+                with m.If(buff.w_data == SLIP_END):
+                    m.d.comb += source.eop.eq(1)
+                with m.Else():
+                    m.d.comb += source.eop.eq(0)
+            with m.State("ESCAPED_INIT"):
+                # same as Escaped except sets SOP
+                m.d.comb += stalled.eq(0)
+                m.d.comb += source.sop.eq(1)
+                with m.If(sink.we):
+                    m.next = "ACTIVE" # always true
+                with m.Switch(buff.r_data):
+                    with m.Case(SLIP_ESC_ESC.value):
+                        m.d.comb += source.data.eq(SLIP_ESC)
+                    with m.Case(SLIP_ESC_END.value):
+                        m.d.comb += source.data.eq(SLIP_END)
+                    with m.Default():
+                        # should never happen but pulse err anyway i guess
+                        m.d.sync += self.err.eq(1)
+                        
+        return m
 

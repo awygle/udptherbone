@@ -50,6 +50,8 @@ class StreamSource:
         
         self.data: Record = Record(self.payload_type, name=data_name)
         
+        self.re: Value = self.ready & self.valid
+        
         
 class StreamSink:
     @classmethod
@@ -81,6 +83,8 @@ class StreamSink:
             self.eop: InputSignal = InputSignal(Signal())
         
         self.data: Record = Record(self.payload_type)
+        
+        self.we: Value = self.ready & self.valid
     
     def connect(self, source: StreamSource):
         # fields is an OrderedDict so this should work
