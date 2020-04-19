@@ -161,6 +161,7 @@ class SLIPUnframer(Elaboratable):
         # input <-> sink
         m.d.comb += [
                 sink.valid.eq(self._input.valid),
+                self._input.ready.eq(sink.ready),
                 sink.data.eq(self._input.data),
                 ]
         
