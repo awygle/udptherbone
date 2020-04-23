@@ -105,3 +105,72 @@ def test_depacketizer_sim():
     
     with sim.write_vcd("udp_de.vcd", "udp_de.gtkw"):
         sim.run()
+
+def test_loopback_sim():
+    from nmigen.back.pysim import Simulator, Passive
+    from ipaddress import IPv4Address
+    
+    class Top(Elaboratable):
+        def __init__(self):
+            host_addr = IPv4Address("127.0.0.1")
+            dest_addr = IPv4Address("127.0.0.2")
+            host_port = 2574
+            dest_port = 7777
+            self.i = i = StreamSource(Layout([("data", 8, DIR_FANOUT)]), name="input", sop=True, eop=True)
+            self.p = p = UDPPacketizer(i, host_addr, dest_addr, source_port = host_port, dest_port = dest_port)
+            self.d = d = UDPDepacketizer(p.source, dest_addr, port = dest_port)
+            self.o = o = d.source
+        
+        def elaborate(self, platform):
+            m = Module()
+            
+            m.submodules.p = self.p
+            m.submodules.d = self.d
+            
+            return m
+    
+    t = Top()
+
+    sim = Simulator(t)
+    sim.add_clock(1e-6)
+    
+    def transmit_proc():
+        yield
+        for c in "hello world":
+            if c == "h":
+                yield t.i.sop.eq(1)
+            elif c == "d":
+                yield t.i.eop.eq(1)
+            else:
+                yield t.i.sop.eq(0)
+                yield t.i.eop.eq(0)
+            yield t.i.data.eq(ord(c))
+            yield t.i.valid.eq(1)
+            yield
+        for g in range(0, 16):
+            yield t.i.eop.eq(0)
+            yield t.i.valid.eq(0)
+            yield
+    
+    def receive_proc():
+        data = []
+        yield
+        yield t.d.source.ready.eq(1)
+        yield
+        #for g in range(0, 512):
+        #    yield
+        while (yield t.d.source.valid) == 0:
+            yield
+        while not (yield t.d.source.valid) == 0:
+            if (yield t.d.source.valid) == 1:
+                data.append((yield t.d.source.data))
+            yield
+        
+        assert "".join(list(map(chr, data))) == "hello world"
+
+    sim.add_sync_process(transmit_proc)
+    sim.add_sync_process(receive_proc)
+    
+    with sim.write_vcd("udp_loop.vcd", "udp_loop.gtkw"):
+        sim.run()
+        
