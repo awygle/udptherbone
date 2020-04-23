@@ -260,7 +260,7 @@ class UDPDepacketizer(Elaboratable):
         m.d.comb += source.data.eq(fifo.r_data)
         m.d.comb += source.valid.eq(counter_fifo.r_rdy)
         m.d.comb += source.sop.eq(0)
-        m.d.comb += source.eop.eq(1)
+        m.d.comb += source.sop.eq(1)
         
         # output FSM
         with m.FSM(name='output_fsm') as fsm:
