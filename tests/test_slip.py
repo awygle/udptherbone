@@ -69,7 +69,7 @@ def test_unframer_sim():
     def transmit_proc():
         yield
         g = 0
-        d = "hello \xdb\xdd\xdb\xdc\xc0\xc0world\xdb\xdd\xc0"
+        d = "hello \xc0 world\xc0"
         m = len(d)
         while g < m:
             c = d[g]
@@ -98,7 +98,7 @@ def test_unframer_sim():
                 packets += 1
             yield
         
-        assert list(map(hex, data)) == list(map(hex, b"hello \xdb\xc0world\xdb"))
+        assert list(map(hex, data)) == list(map(hex, b"hello  world"))
 
     sim.add_sync_process(transmit_proc)
     sim.add_sync_process(receive_proc)
