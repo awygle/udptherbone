@@ -8,6 +8,17 @@ SLIP_ESC = C(0xDB, 8)
 SLIP_ESC_END = C(0xDC, 8)
 SLIP_ESC_ESC = C(0xDD, 8)
 
+def slip_encode(b):
+    res = b.replace(b'\xdb', b'\xdb\xdd')
+    res = b.replace(b'\xc0', b'\xdb\xdc')
+    res += b'\xc0'
+    return res
+
+def slip_decode(b):
+    res = b.replace(b'\xdb\xdd', b'\xdb')
+    res = b.replace(b'\xdb\xdc', b'\xc0')
+    return res[:-1]
+
 class SLIPFramer(Elaboratable):
     """
     TODO formal docstring
@@ -131,8 +142,8 @@ class SLIPFramer(Elaboratable):
 class SLIPUnframer(Elaboratable):
     """
     TODO formal docstring
-    Input: stream with framing
-    Output: stream without framing
+    Input: stream without framing
+    Output: stream with framing
     Parameter: none?
     Control signals: error
     """
@@ -211,7 +222,7 @@ class SLIPUnframer(Elaboratable):
                         # we can ignore this, it's an empty packet
                         m.d.comb += source.eop.eq(0)
                         m.d.comb += stalled.eq(1)
-                        with m.If(sink.we):
+                        with m.If(source.re):
                             m.next = "INIT" # for clarity
                     with m.Default():
                         # normal stuff, set SOP, advance to ACTIVE
@@ -220,7 +231,7 @@ class SLIPUnframer(Elaboratable):
                             m.d.comb += source.eop.eq(1)
                         with m.Else():
                             m.d.comb += source.eop.eq(0)
-                        with m.If(sink.we):
+                        with m.If(source.re):
                             m.next = "ACTIVE"
             with m.State("ACTIVE"):
                 m.d.comb += source.data.eq(buff.r_data) # no case where this isn't OK
@@ -251,7 +262,7 @@ class SLIPUnframer(Elaboratable):
                             m.d.comb += source.eop.eq(1)
                         with m.Else():
                             m.d.comb += source.eop.eq(0)
-                        with m.If(sink.we):
+                        with m.If(source.re):
                             m.next = "ACTIVE" # for clarity
             with m.State("ESCAPED"):
                 m.d.comb += stalled.eq(0)
@@ -275,7 +286,7 @@ class SLIPUnframer(Elaboratable):
                 # same as Escaped except sets SOP
                 m.d.comb += stalled.eq(0)
                 m.d.comb += source.sop.eq(1)
-                with m.If(sink.we):
+                with m.If(source.re):
                     m.next = "ACTIVE" # always true
                 with m.Switch(buff.r_data):
                     with m.Case(SLIP_ESC_ESC.value):

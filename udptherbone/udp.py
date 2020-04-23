@@ -42,8 +42,8 @@ class UDPDepacketizer(Elaboratable):
         assert input.eop_enabled
         self._input = input
 
-        self.sink = StreamSink.from_source(input)
-        self.source = StreamSource(Layout([("data", 8, DIR_FANOUT)]), sop=True, eop=True)
+        self.sink = StreamSink.from_source(input, name="packed_sink")
+        self.source = StreamSource(Layout([("data", 8, DIR_FANOUT)]), sop=True, eop=True, name="unpacked_source")
         
         self._ip = C(int.from_bytes(ip.packed, byteorder='big'), 32)
         self._port = C(port, 16)
@@ -260,7 +260,7 @@ class UDPDepacketizer(Elaboratable):
         m.d.comb += source.data.eq(fifo.r_data)
         m.d.comb += source.valid.eq(counter_fifo.r_rdy)
         m.d.comb += source.sop.eq(0)
-        m.d.comb += source.sop.eq(1)
+        m.d.comb += source.eop.eq(0)
         
         # output FSM
         with m.FSM(name='output_fsm') as fsm:
@@ -302,9 +302,9 @@ class UDPPacketizer(Elaboratable):
 
         self._mtu = mtu
         self._input = input
-        self.sink = StreamSink.from_source(input)
+        self.sink = StreamSink.from_source(input, name="unpacked_sink")
         
-        self.source = StreamSource(Layout([("data", 8, DIR_FANOUT)]), sop=True, eop=True)
+        self.source = StreamSource(Layout([("data", 8, DIR_FANOUT)]), sop=True, eop=True, name="packed_source")
         
         self._in_flight = in_flight
         self._proto = C(IPProtocolNumber.UDP.value, 8)
