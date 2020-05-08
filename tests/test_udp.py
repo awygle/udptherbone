@@ -1,5 +1,6 @@
 
 from udptherbone.udp import *
+from scapy.all import *
 
 def test_packetizer_sim():
     from nmigen.back.pysim import Simulator, Passive
@@ -57,16 +58,24 @@ def test_packetizer_sim():
         
 def test_depacketizer_sim():
     from nmigen.back.pysim import Simulator, Passive
+    from udptherbone.slip import SLIPUnframer, SLIPFramer, slip_encode, slip_decode
     
     input = i = StreamSource(Layout([("data", 8, DIR_FANOUT)]))
-    depacketizer = d = UDPDepacketizer(input, ipaddress.IPv4Address("127.0.0.1"), port = 2574)
+    depacketizer = d = UDPDepacketizer(input, ipaddress.IPv4Address("127.0.0.2"), port = 2574)
 
     sim = Simulator(depacketizer)
     sim.add_clock(1e-6)
     
+    input_pkt = IP(src='127.0.0.1', dst='127.0.0.2', flags='DF')/UDP(dport=2574, sport=7777)/"hello world"
+    input_data = raw(input_pkt)
+    input_pkt = IP(input_data)
+    input_encoded = slip_encode(input_data)
+    
     def de_input_proc():
         yield
-        for b in b'E\x00\x00\x13\x00\x00@\x00\xff\x11}\xd6\x7f\x00\x00\x02\x7f\x00\x00\x01\x1ea\n\x0e\x00\x13\xc40hello world':
+        g = 0
+        while g < len(input_encoded):
+            b = input_encoded[g]
             if b == 'E':
                 yield i.sop.eq(1)
             elif b == 'd':
@@ -77,6 +86,8 @@ def test_depacketizer_sim():
             yield i.data.eq(b)
             yield i.valid.eq(1)
             yield
+            if (yield i.ready) == 1:
+                g += 1
         for g in range(0, 16):
             yield i.sop.eq(0)
             yield i.eop.eq(0)
@@ -91,11 +102,11 @@ def test_depacketizer_sim():
         yield
         #for g in range(0, 512):
         #    yield
-        while (yield d.source.valid) == 0:
-            yield
-        while not (yield d.source.valid) == 0:
+        while True:
             if (yield d.source.valid) == 1:
                 data.append((yield d.source.data))
+                if (yield d.source.eop) == 1:
+                    break
             yield
         
         assert "".join(list(map(chr, data))) == "hello world"
@@ -177,6 +188,7 @@ def test_loopback_sim():
 def test_reverse_loopback_sim():
     from nmigen.back.pysim import Simulator, Passive
     from ipaddress import IPv4Address
+    from udptherbone.slip import SLIPUnframer, SLIPFramer, slip_encode, slip_decode
     
     class Bottom(Elaboratable):
         def __init__(self):
@@ -185,7 +197,7 @@ def test_reverse_loopback_sim():
             host_port = 2574
             dest_port = 7777
             self.i = i = StreamSource(Layout([("data", 8, DIR_FANOUT)]), name="input", sop=True, eop=True)
-            self.d = d = UDPDepacketizer(i, host_addr, port = host_port)
+            self.d = d = UDPDepacketizer(i, dest_addr, port = dest_port)
             self.p = p = UDPPacketizer(d.source, dest_addr, host_addr, source_port = dest_port, dest_port = host_port)
             self.o = o = p.source
         
@@ -202,9 +214,16 @@ def test_reverse_loopback_sim():
     sim = Simulator(t)
     sim.add_clock(1e-6)
     
+    input_pkt = IP(src='127.0.0.1', dst='127.0.0.2', flags='DF')/UDP(dport=7777, sport=2574)/"hello world"
+    input_data = raw(input_pkt)
+    input_pkt = IP(input_data)
+    input_encoded = slip_encode(input_data)
+    
     def transmit_proc():
         yield
-        for b in b'E\x00\x00\x13\x00\x00@\x00\xff\x11}\xd6\x7f\x00\x00\x02\x7f\x00\x00\x01\x1ea\n\x0e\x00\x13\xc40hello world':
+        g = 0
+        while g < len(input_encoded):
+            b = input_encoded[g]
             if b == ord(b'E'):
                 yield t.i.sop.eq(1)
                 yield t.i.eop.eq(0)
@@ -217,6 +236,8 @@ def test_reverse_loopback_sim():
             yield t.i.data.eq(b)
             yield t.i.valid.eq(1)
             yield
+            if (yield t.i.ready) == 1:
+                g += 1
         for g in range(0, 16):
             yield t.i.sop.eq(0)
             yield t.i.eop.eq(0)
@@ -267,7 +288,7 @@ def test_reverse_loopback_with_slip_sim():
             dest_port = 7777
             self.i = i = StreamSource(Layout([("data", 8, DIR_FANOUT)]), name="input", sop=False, eop=False)
             self.u = u = SLIPUnframer(i)
-            self.d = d = UDPDepacketizer(u.source, host_addr, port = host_port)
+            self.d = d = UDPDepacketizer(u.source, dest_addr, port = dest_port)
             self.p = p = UDPPacketizer(d.source, dest_addr, host_addr, source_port = dest_port, dest_port = host_port)
             self.f = f = SLIPFramer(p.source)
             self.o = o = f.source
@@ -287,16 +308,24 @@ def test_reverse_loopback_with_slip_sim():
     sim = Simulator(t)
     sim.add_clock(1e-6)
     
-    input_data = b'E\x00\x00\x13\x00\x00@\x00\xff\x11}\xd6\x7f\x00\x00\x02\x7f\x00\x00\x01\x1ea\n\x0e\x00\x13\xc40hello world'
+    input_pkt = IP(src='127.0.0.1', dst='127.0.0.2', flags='DF')/UDP(dport=7777, sport=2574)/"hello world"
+    input_data = raw(input_pkt)
+    input_pkt = IP(input_data)
+    input_pkt.show()
+    input_encoded = slip_encode(input_data)
+    print()
+    print(list(map(hex, input_encoded)))
     
     def transmit_proc():
-        print()
         yield
-        for b in slip_encode(input_data):
-            print(f"{hex(b)}, ", end='')
+        g = 0
+        while g < len(input_encoded):
+            b = input_encoded[g]
             yield t.i.data.eq(b)
             yield t.i.valid.eq(1)
             yield
+            if (yield t.i.ready) == 1:
+                g += 1
         for g in range(0, 16):
             yield t.i.valid.eq(0)
             yield
@@ -309,12 +338,14 @@ def test_reverse_loopback_with_slip_sim():
             yield
         yield t.o.ready.eq(1)
         yield
-        while not (yield t.o.valid) == 0:
+        while True:
             if (yield t.o.valid) == 1:
                 data.append((yield t.o.data))
+                if (yield t.o.data) == 0xc0:
+                    break
             yield
         
-        print(data)
+        print(list(map(hex, data)))
         r = IP(slip_decode(bytes(data)))
         r.show()
         
@@ -329,4 +360,153 @@ def test_reverse_loopback_with_slip_sim():
     sim.add_sync_process(receive_proc)
     
     with sim.write_vcd("udp_rev_slip.vcd", "udp_rev_slip.gtkw"):
+        sim.run()
+        
+def test_slip_depacketizer():
+    from nmigen.back.pysim import Simulator, Passive
+    from ipaddress import IPv4Address
+    from udptherbone.slip import SLIPUnframer, SLIPFramer, slip_encode, slip_decode
+    
+    class Bottom(Elaboratable):
+        def __init__(self):
+            dest_addr = IPv4Address("127.0.0.2")
+            dest_port = 7777
+            self.i = i = StreamSource(Layout([("data", 8, DIR_FANOUT)]), name="input", sop=False, eop=False)
+            self.u = u = SLIPUnframer(i)
+            self.d = d = UDPDepacketizer(u.source, dest_addr, port = dest_port)
+            self.o = o = d.source
+        
+        def elaborate(self, platform):
+            m = Module()
+            
+            m.submodules.u = self.u
+            m.submodules.d = self.d
+            
+            return m
+    
+    t = Bottom()
+
+    sim = Simulator(t)
+    sim.add_clock(1e-6)
+    
+    input_pkt = IP(src='127.0.0.1', dst='127.0.0.2', flags='DF')/UDP(dport=7777, sport=2574)/"hello world"
+    input_data = raw(input_pkt)
+    input_pkt = IP(input_data)
+    input_encoded = slip_encode(input_data)
+    
+    def transmit_proc():
+        yield
+        g = 0
+        while g < len(input_encoded):
+            b = input_encoded[g]
+            yield t.i.data.eq(b)
+            yield t.i.valid.eq(1)
+            yield
+            if (yield t.i.ready) == 1:
+                g += 1
+        for g in range(0, 16):
+            yield t.i.valid.eq(0)
+            yield
+    
+    def receive_proc():
+        for g in range(0, 16):
+            yield
+        data = []
+        for g in range(0, 128):
+            yield
+        yield t.o.ready.eq(1)
+        yield
+        while True:
+            if (yield t.o.valid) == 1:
+                data.append((yield t.o.data))
+                if (yield t.o.eop) == 1:
+                    break
+            yield
+        
+        assert "".join(list(map(chr, data))) == "hello world"
+        
+
+    sim.add_sync_process(transmit_proc)
+    sim.add_sync_process(receive_proc)
+    
+    with sim.write_vcd("udp_slip_de.vcd", "udp_slip_de.gtkw"):
+        sim.run()
+        
+def test_uart_slip_depacketizer():
+    from nmigen.back.pysim import Simulator, Passive
+    from ipaddress import IPv4Address
+    from udptherbone.slip import SLIPUnframer, SLIPFramer, slip_encode, slip_decode
+    from udptherbone.uart import UARTTx, UARTRx
+    
+    class Bottom(Elaboratable):
+        def __init__(self):
+            dest_addr = IPv4Address("127.0.0.2")
+            dest_port = 7777
+            self.i = i = StreamSource(Layout([("data", 8, DIR_FANOUT)]), name="input", sop=False, eop=False)
+            self.tx = tx = UARTTx(divisor = 4)
+            self.rx = rx = UARTRx(divisor = 4)
+            self.u = u = SLIPUnframer(rx.source)
+            self.d = d = UDPDepacketizer(u.source, dest_addr, port = dest_port)
+            self.o = o = d.source
+        
+        def elaborate(self, platform):
+            m = Module()
+            
+            m.submodules.tx = self.tx
+            m.submodules.rx = self.rx
+            m.submodules.u = self.u
+            m.submodules.d = self.d
+            
+            m.d.comb += self.rx.rx_i.eq(self.tx.tx_o)
+            
+            m.d.comb += self.tx.sink.connect(self.i)
+            
+            return m
+    
+    t = Bottom()
+
+    sim = Simulator(t)
+    sim.add_clock(1e-6)
+    
+    input_pkt = IP(src='127.0.0.1', dst='127.0.0.2', flags='DF')/UDP(dport=7777, sport=2574)/"hello world"
+    input_data = raw(input_pkt)
+    input_pkt = IP(input_data)
+    input_encoded = b'\xc0\xc0\xc0\xc0' + slip_encode(input_data)
+    
+    def transmit_proc():
+        yield
+        g = 0
+        while g < len(input_encoded):
+            b = input_encoded[g]
+            yield t.i.data.eq(b)
+            yield t.i.valid.eq(1)
+            yield
+            if (yield t.i.ready) == 1:
+                g += 1
+        for g in range(0, 16):
+            yield t.i.valid.eq(0)
+            yield
+    
+    def receive_proc():
+        for g in range(0, 16):
+            yield
+        data = []
+        for g in range(0, 128):
+            yield
+        yield t.o.ready.eq(1)
+        yield
+        while True:
+            if (yield t.o.valid) == 1:
+                data.append((yield t.o.data))
+                if (yield t.o.eop) == 1:
+                    break
+            yield
+        
+        assert "".join(list(map(chr, data))) == "hello world"
+        
+
+    sim.add_sync_process(transmit_proc)
+    sim.add_sync_process(receive_proc)
+    
+    with sim.write_vcd("udp_slip_de.vcd", "udp_slip_de.gtkw"):
         sim.run()

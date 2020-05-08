@@ -1,14 +1,12 @@
 
 from nmigen import *
-from nmigen.lib.fifo import SyncFIFO
+from nmigen.lib.fifo import SyncFIFOBuffered
 from .stream import *
 
 import enum
 import ipaddress
 import math
 
-from scapy.all import *
-            
 class IPProtocolNumber(enum.Enum):
     TCP = 0x06
     UDP = 0x11
@@ -56,8 +54,8 @@ class UDPDepacketizer(Elaboratable):
         
         m = Module()
         
-        m.submodules.fifo = fifo = SyncFIFO(width=8, depth=self._mtu)
-        m.submodules.counter_fifo = counter_fifo = SyncFIFO(width=16, depth=self._in_flight, fwft = True)
+        m.submodules.fifo = fifo = SyncFIFOBuffered(width=8, depth=self._mtu)
+        m.submodules.counter_fifo = counter_fifo = SyncFIFOBuffered(width=16, depth=self._in_flight)
         
         counter = Signal(16)
         input_counter = Signal(16)
@@ -102,18 +100,20 @@ class UDPDepacketizer(Elaboratable):
                     m.next = "HEADER_BYTE4"
             with m.State("HEADER_BYTE4"):
                 with m.If(we):
-                    with m.If(sink.data == ID[8:]):
-                        m.next = "HEADER_BYTE5"
-                    with m.Else():
-                        m.d.sync += input_active.eq(0)
-                        m.next = "IDLE"
+                    # ignore Identification field
+                    #with m.If(sink.data == ID[8:]):
+                    m.next = "HEADER_BYTE5"
+                    #with m.Else():
+                    #    m.d.sync += input_active.eq(0)
+                    #    m.next = "IDLE"
             with m.State("HEADER_BYTE5"):
                 with m.If(we):
-                    with m.If(sink.data == ID[:8]):
-                        m.next = "HEADER_BYTE6"
-                    with m.Else():
-                        m.d.sync += input_active.eq(0)
-                        m.next = "IDLE"
+                    # ignore Identification field
+                    #with m.If(sink.data == ID[:8]):
+                    m.next = "HEADER_BYTE6"
+                    #with m.Else():
+                    #    m.d.sync += input_active.eq(0)
+                    #    m.next = "IDLE"
             with m.State("HEADER_BYTE6"):
                 with m.If(we):
                     with m.If(sink.data == Cat(FO[8:], FLAGS)):
@@ -216,7 +216,7 @@ class UDPDepacketizer(Elaboratable):
                         m.next = "IDLE"
             with m.State("UDP_HEADER_BYTE4"):
                 with m.If(we):
-                    with m.If(sink.data == counter[8:]):
+                    with m.If(sink.data == (counter - 20)[8:]):
                         m.next = "UDP_HEADER_BYTE5"
                     with m.Else():
                         # length mismatch between IP and UDP headers - fragmented?
@@ -224,7 +224,7 @@ class UDPDepacketizer(Elaboratable):
                         m.next = "IDLE"
             with m.State("UDP_HEADER_BYTE5"):
                 with m.If(we):
-                    with m.If(sink.data == counter[:8]):
+                    with m.If(sink.data == (counter - 20)[:8]):
                         m.next = "UDP_HEADER_BYTE6"
                     with m.Else():
                         m.d.sync += input_active.eq(0)
@@ -236,7 +236,8 @@ class UDPDepacketizer(Elaboratable):
             with m.State("UDP_HEADER_BYTE7"):
                 with m.If(we):
                     # TODO validate checksum
-                    m.d.sync += input_counter.eq(counter - 8)
+                    m.d.sync += input_counter.eq(counter - 28)
+                    m.d.sync += counter.eq(counter - 20)
                     m.next = "PAYLOAD"
             with m.State("PAYLOAD"):
                 with m.If(we):
@@ -347,7 +348,7 @@ class UDPPacketizer(Elaboratable):
         
         m = Module()
         # TODO figure out a _useful_ stream abstraction that can handle this use case
-        m.submodules.fifo = fifo = SyncFIFO(width=8, depth=self._mtu)
+        m.submodules.fifo = fifo = SyncFIFOBuffered(width=8, depth=self._mtu)
         
         # input side
         m.d.comb += self.sink.connect(self._input)
@@ -355,8 +356,8 @@ class UDPPacketizer(Elaboratable):
         counter = Signal(16)
         active = Signal()
         
-        m.submodules.counter_fifo = counter_fifo = SyncFIFO(width=16, depth=self._in_flight, fwft = True)
-        m.submodules.checksum_fifo = checksum_fifo = SyncFIFO(width=16, depth=self._in_flight, fwft = True)
+        m.submodules.counter_fifo = counter_fifo = SyncFIFOBuffered(width=16, depth=self._in_flight)
+        m.submodules.checksum_fifo = checksum_fifo = SyncFIFOBuffered(width=16, depth=self._in_flight)
         
         # gotta stall if _either_ FIFO is full, means sink can't be exactly fifo's sink
         m.d.comb += sink.ready.eq(fifo.w_rdy & counter_fifo.w_rdy)
@@ -423,13 +424,13 @@ class UDPPacketizer(Elaboratable):
                     
                     # latch out counter value
                     m.d.sync += counter_fifo.r_en.eq(1)
-                    m.d.sync += pkt_len.eq(counter_fifo.r_data + 8)
+                    m.d.sync += pkt_len.eq(counter_fifo.r_data)
                     
                     # advance checksum FIFO
                     m.d.sync += checksum_fifo.r_en.eq(1)
                     
                     # calculate full checksums from counter value
-                    checksum_intermediate = self._partial_ip_checksum() + counter_fifo.r_data + 8
+                    checksum_intermediate = self._partial_ip_checksum() + counter_fifo.r_data + 28
                     checksum_intermediate = checksum_intermediate[:16] + checksum_intermediate[16:]
                     checksum_intermediate = checksum_intermediate[:16] + checksum_intermediate[16:]
                     m.d.sync += ip_checksum.eq(checksum_intermediate[:16])
@@ -454,7 +455,7 @@ class UDPPacketizer(Elaboratable):
                 
             with m.State("IP_LENGTH"):
                 # send current length byte
-                m.d.comb += source.data.eq(pkt_len.word_select(header_idx, 8))
+                m.d.comb += source.data.eq((pkt_len+28).word_select(header_idx, 8))
                 
                 with m.If(re):
                     # decrement index
@@ -584,7 +585,7 @@ class UDPPacketizer(Elaboratable):
             
             with m.State("UDP_LENGTH"):
                 # send current length byte
-                m.d.comb += source.data.eq(pkt_len.word_select(header_idx, 8))
+                m.d.comb += source.data.eq((pkt_len + 8).word_select(header_idx, 8))
                 
                 with m.If(re):
                     # decrement index
@@ -618,7 +619,7 @@ class UDPPacketizer(Elaboratable):
                     # decrement length
                     m.d.sync += pkt_len.eq(pkt_len - 1)
                     
-                    with m.If(pkt_len - 1 == 8): # sizeof(UDP header)
+                    with m.If(pkt_len - 1 == 0):
                         # set EOP
                         m.d.comb += self.source.eop.eq(1)
                         # mark output inactive

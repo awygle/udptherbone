@@ -10,13 +10,13 @@ SLIP_ESC_ESC = C(0xDD, 8)
 
 def slip_encode(b):
     res = b.replace(b'\xdb', b'\xdb\xdd')
-    res = b.replace(b'\xc0', b'\xdb\xdc')
+    res = res.replace(b'\xc0', b'\xdb\xdc')
     res += b'\xc0'
     return res
 
 def slip_decode(b):
     res = b.replace(b'\xdb\xdd', b'\xdb')
-    res = b.replace(b'\xdb\xdc', b'\xc0')
+    res = res.replace(b'\xdb\xdc', b'\xc0')
     return res[:-1]
 
 class SLIPFramer(Elaboratable):
@@ -44,12 +44,9 @@ class SLIPFramer(Elaboratable):
         
         m = Module()
         
-        stalled = Signal()
+        stalled = Signal(range(4))
         
-        m.submodules.buffer = buff = SyncFIFO(width=8, depth=4)
-        
-        m.d.comb += sink.ready.eq(buff.w_rdy & ~stalled)
-        m.d.comb += buff.w_en.eq(sink.we)
+        m.d.comb += sink.ready.eq(stalled == 0)
         
         # this should be a "connect" call
         m.d.comb += [
@@ -60,81 +57,77 @@ class SLIPFramer(Elaboratable):
                 sink.data.eq(self._input.data),
                 ]
         
-        m.d.comb += [
-                source.data.eq(buff.r_data),
-                source.valid.eq(buff.r_rdy),
-                buff.r_en.eq(source.re)
-                ]
+        m.d.comb += source.valid.eq(stalled > 0)
         
         escapable = Signal()
         m.d.comb += escapable.eq((sink.data == SLIP_END) | (sink.data == SLIP_ESC))
         
         escaped = Signal(8)
+        held = Signal(8)
         
+        with m.If(source.re):
+            m.d.sync += stalled.eq(stalled - 1)
+            
         with m.FSM():
             with m.State("ACTIVE"):
-                m.d.sync += stalled.eq(0)
-                m.d.comb += buff.w_data.eq(Mux(escapable, SLIP_ESC, sink.data))
                 with m.If(sink.we):
+                    m.d.sync += held.eq(sink.data)
                     with m.Switch(Cat(self.sink.eop, escapable)):
                         with m.Case(0b00):
                             # not EOP, not escapable
                             # simply pass through
-                            m.d.sync += stalled.eq(0)
+                            m.d.sync += stalled.eq(1)
+                            m.d.sync += source.data.eq(sink.data)
                         with m.Case(0b01):
                             # EOP, not escapable
-                            # write out and then transition to END state - stall for one cycle
-                            m.d.sync += stalled.eq(1)
+                            # write out and then transition to END state - stall for one additional cycle
+                            m.d.sync += stalled.eq(2)
+                            m.d.sync += source.data.eq(sink.data)
                             m.next = "END"
                         with m.Case(0b10):
                             # not EOP, escapable
-                            # escape, dump to skid, stall for one cycle
-                            m.d.sync += escaped.eq(sink.data)
-                            m.d.sync += stalled.eq(1)
+                            # escape, stall for one additional cycle
+                            m.d.sync += stalled.eq(2)
+                            m.d.sync += source.data.eq(SLIP_ESC)
                             m.next = "ESC"
                         with m.Case(0b11):
                             # EOP, escapable
-                            # escape, dump to skid, stall for two cycles while ending packet
-                            m.d.sync += escaped.eq(self._input.data)
-                            m.d.sync += stalled.eq(1)
+                            # stall for two additional cycles while ending packet
+                            m.d.sync += stalled.eq(3)
+                            m.d.sync += source.data.eq(SLIP_ESC)
                             m.next = "ESC_END"
                         
             with m.State("END"):
                 # end only
-                m.d.comb += buff.w_data.eq(SLIP_END)
-                m.d.comb += buff.w_en.eq(1)
-                with m.If(buff.w_rdy):
-                    m.d.sync += stalled.eq(0)
+                with m.If(source.re):
+                    m.d.sync += source.data.eq(SLIP_END)
                     m.next = "ACTIVE"
                 
             with m.State("ESC"):
                 # escape only
-                with m.If(escaped == SLIP_END):
-                    m.d.comb += buff.w_data.eq(SLIP_ESC_END)
-                with m.If(escaped == SLIP_ESC):
-                    m.d.comb += buff.w_data.eq(SLIP_ESC_ESC)
-                with m.Else():
-                    # TODO assert this can't happen?
-                    m.d.sync += self.err.eq(1)
-                    m.next = "ACTIVE"
-                m.d.comb += buff.w_en.eq(1)
-                with m.If(buff.w_rdy):
-                    m.d.sync += stalled.eq(0)
+                with m.If(source.re):
+                    with m.Switch(held):
+                        with m.Case(SLIP_END.value):
+                            m.d.sync += source.data.eq(SLIP_ESC_END)
+                        with m.Case(SLIP_ESC.value):
+                            m.d.sync += source.data.eq(SLIP_ESC_ESC)
+                        with m.Default():
+                            # TODO assert this can't happen?
+                            m.d.sync += self.err.eq(1)
                     m.next = "ACTIVE"
                 
             with m.State("ESC_END"):
                 # escape, then end
-                with m.If(escaped == SLIP_END):
-                    m.d.comb += buff.w_data.eq(SLIP_ESC_END)
-                with m.If(escaped == SLIP_ESC):
-                    m.d.comb += buff.w_data.eq(SLIP_ESC_ESC)
-                with m.Else():
-                    # TODO assert this can't happen?
-                    m.d.sync += self.err.eq(1)
-                    m.next = "ACTIVE"
-                m.d.comb += buff.w_en.eq(1)
-                with m.If(buff.w_rdy):
-                    m.d.sync += stalled.eq(1) # remain stalled
+                with m.If(source.re):
+                    with m.Switch(held):
+                        with m.Case(SLIP_END.value):
+                            m.d.sync += source.data.eq(SLIP_ESC_END)
+                        with m.Case(SLIP_ESC.value):
+                            m.d.sync += source.data.eq(SLIP_ESC_ESC)
+                        with m.Default():
+                            # TODO assert this can't happen?
+                            m.d.sync += self.err.eq(1)
+                            m.next = "ACTIVE"
                     m.next = "END"
                         
         return m
@@ -164,138 +157,101 @@ class SLIPUnframer(Elaboratable):
         
         m = Module()
         
-        # input <-> sink <-> buff <-> source
-        m.submodules.buff = buff = SyncFIFO(width=8, depth=2, fwft=True)
-        
-        stalled = Signal()
-        
-        # input <-> sink
+        # connect input to sink
         m.d.comb += [
-                sink.valid.eq(self._input.valid),
-                self._input.ready.eq(sink.ready),
                 sink.data.eq(self._input.data),
-                ]
+                self._input.ready.eq(sink.ready),
+                sink.valid.eq(self._input.valid),
+            ]
         
-        # sink <-> buff
-        m.d.comb += [
-                sink.ready.eq(buff.w_rdy),
-                buff.w_data.eq(sink.data),
-                buff.w_en.eq(sink.we),
-                ]
+        future = sink.data
+        current = Signal(8)
         
-        # buff <-> source
-        m.d.comb += [
-                source.valid.eq(buff.r_rdy & ~stalled),
-                buff.r_en.eq(source.re | stalled),
-                ]
+        init = Signal()
+        read_en = Signal()
+        
+        with m.If(source.re):
+            m.d.sync += read_en.eq(0) # may be overridden below
+            m.d.sync += source.eop.eq(0)
+        
+        with m.If(sink.we):
+            m.d.sync += current.eq(future)
+            m.d.sync += init.eq(1) # have to skip first write, prime the pump
+            with m.If(future == SLIP_END.value):
+                m.d.sync += source.eop.eq(1)
             
-        escape = Signal()
-        escaped = Signal()
-        end = Signal()
-        input_end = Signal()
-        m.d.comb += [
-                escape.eq(buff.r_data == SLIP_ESC),
-                end.eq(buff.r_data == SLIP_END),
-                input_end.eq(buff.w_data == SLIP_END),
-                ]
         
-        m.d.sync += self.err.eq(0)
+        m.d.comb += self.err.eq(0)
         
-        with m.FSM():
-            with m.State("INIT"):
-                m.d.comb += source.data.eq(buff.r_data) # no case where this isn't OK
-                with m.Switch(buff.r_data):
-                    with m.Case(SLIP_ESC.value):
-                        m.d.comb += source.eop.eq(0)
-                        with m.If((buff.w_data == SLIP_ESC_ESC) | (buff.w_data == SLIP_ESC_END)):
-                            # legal. go to escape state, drop this input
-                            m.d.comb += stalled.eq(1)
-                            with m.If(sink.we):
-                                m.next = "ESCAPED_INIT"
-                        with m.Else():
-                            # illegal. pulse error, stay here
-                            m.d.comb += stalled.eq(1)
-                            m.d.sync += self.err.eq(1)
-                            with m.If(sink.we):
-                                m.next = "INIT" # for clarity
-                    with m.Case(SLIP_END.value):
-                        # we can ignore this, it's an empty packet
-                        m.d.comb += source.eop.eq(0)
-                        m.d.comb += stalled.eq(1)
-                        with m.If(source.re):
+        m.d.comb += sink.ready.eq(~read_en)
+        m.d.comb += source.valid.eq(read_en)
+        
+        with m.If(sink.we & init):
+            with m.FSM():
+                with m.State("INIT"):
+                    with m.Switch(current):
+                        with m.Case(SLIP_ESC.value):
+                            # go to escape state, wait for next input
+                            m.d.sync += read_en.eq(0)
+                            m.next = "ESCAPED_INIT"
+                        with m.Case(SLIP_END.value):
+                            # we can ignore this, it's an empty packet
+                            m.d.sync += read_en.eq(0)
                             m.next = "INIT" # for clarity
-                    with m.Default():
-                        # normal stuff, set SOP, advance to ACTIVE
-                        m.d.comb += source.sop.eq(1)
-                        with m.If(buff.w_data == SLIP_END):
-                            m.d.comb += source.eop.eq(1)
-                        with m.Else():
-                            m.d.comb += source.eop.eq(0)
-                        with m.If(source.re):
+                        with m.Default():
+                            # normal stuff, output, set SOP, advance to ACTIVE
+                            m.d.sync += source.data.eq(current)
+                            m.d.sync += read_en.eq(1)
+                            m.d.sync += source.sop.eq(1)
                             m.next = "ACTIVE"
-            with m.State("ACTIVE"):
-                m.d.comb += source.data.eq(buff.r_data) # no case where this isn't OK
-                m.d.comb += source.sop.eq(0)
-                with m.Switch(buff.r_data):
-                    with m.Case(SLIP_ESC.value):
-                        m.d.comb += source.eop.eq(0)
-                        with m.If((buff.w_data == SLIP_ESC_ESC) | (buff.w_data == SLIP_ESC_END)):
-                            # legal. go to escape state, drop this input
-                            m.d.comb += stalled.eq(1)
-                            with m.If(sink.we):
-                                m.next = "ESCAPED"
-                        with m.Else():
-                            # illegal. pulse error, reset
-                            m.d.comb += stalled.eq(1)
-                            m.d.sync += self.err.eq(1)
-                            with m.If(sink.we):
-                                m.next = "INIT"
-                    with m.Case(SLIP_END.value):
-                        # we already set EOP last time through, skip + reset
-                        m.d.comb += source.eop.eq(0)
-                        m.d.comb += stalled.eq(1)
-                        with m.If(sink.we):
+                with m.State("ACTIVE"):
+                    m.d.sync += source.sop.eq(0)
+                    with m.Switch(current):
+                        with m.Case(SLIP_ESC.value):
+                            # legal. go to escape state, wait for input
+                            m.d.sync += read_en.eq(0)
+                            m.next = "ESCAPED"
+                        with m.Case(SLIP_END.value):
+                            # EOP handled above, wait + reset
+                            m.d.sync += read_en.eq(0)
                             m.next = "INIT"
-                    with m.Default():
-                        # normal stuff, stay here
-                        with m.If(buff.w_data == SLIP_END):
-                            m.d.comb += source.eop.eq(1)
-                        with m.Else():
-                            m.d.comb += source.eop.eq(0)
-                        with m.If(source.re):
+                        with m.Default():
+                            # normal stuff, stay here
+                            m.d.sync += source.data.eq(current)
+                            m.d.sync += read_en.eq(1)
                             m.next = "ACTIVE" # for clarity
-            with m.State("ESCAPED"):
-                m.d.comb += stalled.eq(0)
-                m.d.comb += source.sop.eq(0)
-                m.d.comb += source.eop.eq(0)
-                with m.If(sink.we):
-                    m.next = "ACTIVE" # always true
-                with m.Switch(buff.r_data):
-                    with m.Case(SLIP_ESC_ESC.value):
-                        m.d.comb += source.data.eq(SLIP_ESC)
-                    with m.Case(SLIP_ESC_END.value):
-                        m.d.comb += source.data.eq(SLIP_END)
-                    with m.Default():
-                        # should never happen but pulse err anyway i guess
-                        m.d.sync += self.err.eq(1)
-                with m.If(buff.w_data == SLIP_END):
-                    m.d.comb += source.eop.eq(1)
-                with m.Else():
-                    m.d.comb += source.eop.eq(0)
-            with m.State("ESCAPED_INIT"):
-                # same as Escaped except sets SOP
-                m.d.comb += stalled.eq(0)
-                m.d.comb += source.sop.eq(1)
-                with m.If(source.re):
-                    m.next = "ACTIVE" # always true
-                with m.Switch(buff.r_data):
-                    with m.Case(SLIP_ESC_ESC.value):
-                        m.d.comb += source.data.eq(SLIP_ESC)
-                    with m.Case(SLIP_ESC_END.value):
-                        m.d.comb += source.data.eq(SLIP_END)
-                    with m.Default():
-                        # should never happen but pulse err anyway i guess
-                        m.d.sync += self.err.eq(1)
+                with m.State("ESCAPED"):
+                    with m.Switch(current):
+                        with m.Case(SLIP_ESC_ESC.value):
+                            m.d.sync += read_en.eq(1)
+                            m.d.sync += source.data.eq(SLIP_ESC)
+                            m.next = "ACTIVE"
+                        with m.Case(SLIP_ESC_END.value):
+                            m.d.sync += read_en.eq(1)
+                            m.d.sync += source.data.eq(SLIP_END)
+                            m.next = "ACTIVE"
+                        with m.Default():
+                            # pulse err, return to INIT
+                            m.d.comb += self.err.eq(1)
+                            m.d.sync += read_en.eq(0)
+                            m.next = "INIT"
+                with m.State("ESCAPED_INIT"):
+                    # same as Escaped except sets SOP
+                    m.d.sync += source.sop.eq(1)
+                    with m.Switch(current):
+                        with m.Case(SLIP_ESC_ESC.value):
+                            m.d.sync += read_en.eq(1)
+                            m.d.sync += source.data.eq(SLIP_ESC)
+                            m.next = "ACTIVE"
+                        with m.Case(SLIP_ESC_END.value):
+                            m.d.sync += read_en.eq(1)
+                            m.d.sync += source.data.eq(SLIP_END)
+                            m.next = "ACTIVE"
+                        with m.Default():
+                            # pulse err, return to INIT
+                            m.d.sync += read_en.eq(0)
+                            m.d.comb += self.err.eq(1)
+                            m.next = "INIT"
                         
         return m
 
