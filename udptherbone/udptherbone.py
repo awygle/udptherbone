@@ -5,6 +5,20 @@ from nmigen_soc.wishbone.bus import *
 
 import math
 
+def eb_write(addr, data):
+    import struct
+    
+    magic = struct.pack("!H", 0x4E6F)
+    flags = struct.pack("!H", 0x1444) # no reads, 32-bit address, 32-bit data
+    # 32-bit alignment yo
+    moreflags = struct.pack("!H", 0x08FF) # CYC (end of cycle), use all byte enable bits
+    counts = struct.pack("!H", 0x0100) # one write zero reads
+    # 32-bit alignment yo
+    addr = struct.pack("!L", addr)
+    data = struct.pack("!L", data)
+    
+    return magic + flags + moreflags + counts + addr + data
+
 class UDPTherbone(Elaboratable):
     def __init__(self, mtu=1500, addr_width=32, data_width=32, granularity=8, features=["stall"]):
         self.interface = Interface(addr_width=addr_width, data_width=data_width, granularity=granularity, features=features)
@@ -41,6 +55,7 @@ class UDPTherbone(Elaboratable):
             m.submodules.fifo = fifo = SyncFIFO(width=alignment+2, depth=self._mtu)
         else:
             m.submodules.fifo = fifo = SyncFIFO(width=alignment, depth=self._mtu)
+        m.d.comb += sink.ready.eq(fifo.w_rdy)
         m.d.sync += fifo.w_en.eq(0)
         with m.FSM(name="capture"):
             with m.State("IDLE"):
@@ -73,7 +88,7 @@ class UDPTherbone(Elaboratable):
             with m.State("SIZES"):
                 # TODO handle eop
                 with m.If(sink_we):
-                    with m.If((sink.data[4:] == self._addr_width*8) & (sink.data[:4] == self._data_width*8)):
+                    with m.If((sink.data[4:] == self._addr_width // 8) & (sink.data[:4] == self._data_width // 8)):
                         if alignment == 64:
                             m.d.sync += pad_count.eq(3)
                             m.next = "PADDING"
@@ -115,7 +130,9 @@ class UDPTherbone(Elaboratable):
                     else:
                         m.d.sync += fifo.w_data.eq(Cat(rcount, wcount, Repl(0, alignment - 16)))
                         m.d.sync += fifo.w_en.eq(1)
-                        m.d.sync += tcount.eq(wcount + rcount)
+                        #m.d.sync += tcount.eq(wcount + rcount)
+                        m.d.sync += tcount.eq(wcount + rcount + (wcount > 0) + (rcount > 0))
+                        m.d.sync += pad_count.eq((alignment//8)-1)
                         with m.If(wcount + rcount > 0):
                             m.next = "BLOCK"
                         with m.Else():
@@ -130,7 +147,7 @@ class UDPTherbone(Elaboratable):
                         else:
                             m.d.sync += fifo.w_data.eq(Cat(rcount, wcount, rf, wf, Repl(0, alignment - 18)))
                         m.d.sync += fifo.w_en.eq(1)
-                        m.d.sync += tcount.eq(wcount + rcount)
+                        m.d.sync += tcount.eq(wcount + rcount + (wcount > 0) + (rcount > 0))
                         m.d.sync += pad_count.eq((alignment//8)-1)
                         with m.If(wcount + rcount > 0):
                             m.next = "BLOCK"
@@ -142,7 +159,7 @@ class UDPTherbone(Elaboratable):
                     m.d.sync += val.word_select(pad_count, 8).eq(sink.data)
                     m.d.sync += pad_count.eq(pad_count - 1)
                     with m.If(pad_count == 0):
-                        m.d.sync += fifo.w_data.eq(val)
+                        m.d.sync += fifo.w_data.eq(Cat(sink.data, val[8:]))
                         m.d.sync += fifo.w_en.eq(1)
                         m.d.sync += tcount.eq(tcount - 1)
                         m.d.sync += pad_count.eq((alignment//8)-1)
