@@ -52,9 +52,9 @@ class UDPTherbone(Elaboratable):
         val = Signal(alignment)
         pad_count = Signal(range(4))
         if alignment == 16:
-            m.submodules.fifo = fifo = SyncFIFO(width=alignment+2, depth=self._mtu)
+            m.submodules.fifo = fifo = SyncFIFOBuffered(width=alignment+2, depth=self._mtu)
         else:
-            m.submodules.fifo = fifo = SyncFIFO(width=alignment, depth=self._mtu)
+            m.submodules.fifo = fifo = SyncFIFOBuffered(width=alignment, depth=self._mtu)
         m.d.comb += sink.ready.eq(fifo.w_rdy)
         m.d.sync += fifo.w_en.eq(0)
         with m.FSM(name="capture"):
