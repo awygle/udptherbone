@@ -5,7 +5,7 @@ from nmigen_soc.wishbone.bus import *
 
 import math
 
-def eb_write(addr, data):
+def eb_write(addr, datas):
     import struct
     
     magic = struct.pack("!H", 0x4E6F)
@@ -15,9 +15,26 @@ def eb_write(addr, data):
     counts = struct.pack("!H", 0x0100) # one write zero reads
     # 32-bit alignment yo
     addr = struct.pack("!L", addr)
-    data = struct.pack("!L", data)
+    result = magic + flags + moreflags + counts + addr 
+    for data in datas:
+        d = struct.pack("!L", data)
+        result += d
+        
+    return result
+
+def eb_read(addr):
+    import struct
     
-    return magic + flags + moreflags + counts + addr + data
+    magic = struct.pack("!H", 0x4E6F)
+    flags = struct.pack("!H", 0x1044) # 32-bit address, 32-bit data
+    # 32-bit alignment yo
+    moreflags = struct.pack("!H", 0x08FF) # CYC (end of cycle), use all byte enable bits
+    counts = struct.pack("!H", 0x0001) # one read zero writes
+    # 32-bit alignment yo
+    ret_addr = struct.pack("!L", 0xDEADBEEF) # we're not gonna use this
+    addr = struct.pack("!L", addr)
+    
+    return magic + flags + moreflags + counts + ret_addr + addr
 
 class UDPTherbone(Elaboratable):
     def __init__(self, mtu=1500, addr_width=32, data_width=32, granularity=8, features=["stall"]):
@@ -128,12 +145,12 @@ class UDPTherbone(Elaboratable):
                         m.d.sync += pad_count.eq(3)
                         m.next = "PADDING2"
                     else:
-                        m.d.sync += fifo.w_data.eq(Cat(rcount, wcount, Repl(0, alignment - 16)))
+                        m.d.sync += fifo.w_data.eq(Cat((sink.data), wcount, Repl(0, alignment - 16)))
                         m.d.sync += fifo.w_en.eq(1)
                         #m.d.sync += tcount.eq(wcount + rcount)
-                        m.d.sync += tcount.eq(wcount + rcount + (wcount > 0) + (rcount > 0))
+                        m.d.sync += tcount.eq(wcount + (sink.data) + (wcount > 0) + ((sink.data) > 0))
                         m.d.sync += pad_count.eq((alignment//8)-1)
-                        with m.If(wcount + rcount > 0):
+                        with m.If(wcount + (sink.data) > 0):
                             m.next = "BLOCK"
                         with m.Else():
                             m.next = "IDLE"
@@ -180,6 +197,7 @@ class UDPTherbone(Elaboratable):
         write_start = Signal()
         read_start = Signal()
         m.submodules.output_fifo = output_fifo = SyncFIFO(width=alignment, depth=self._mtu)
+        m.d.sync += output_fifo.w_en.eq(0) # unless overridden
         with m.FSM(name="extract"):
             with m.State("IDLE"):
                 # wait for data
@@ -246,7 +264,7 @@ class UDPTherbone(Elaboratable):
                     m.d.sync += write_start.eq(0)
                     m.next = "WRITE"
                 with m.If(read_start):
-                    m.d.sync += interface.adr.eq(address)
+                    m.d.sync += interface.adr.eq(value)
                     m.d.sync += interface.we.eq(0)
                     m.d.sync += interface.sel.eq(~0)
                     m.d.sync += interface.cyc.eq(1)
@@ -265,7 +283,7 @@ class UDPTherbone(Elaboratable):
                     m.d.sync += interface.stb.eq(0)
                     m.d.sync += interface.we.eq(0)
                     with m.If(write_inc):
-                        address.eq(address + 1)
+                        m.d.sync += address.eq(address + 1)
                     m.next = "IDLE"
             with m.State("READ"):
                 # TODO this is all basically wrong actually
@@ -278,9 +296,9 @@ class UDPTherbone(Elaboratable):
                     m.d.sync += interface.stb.eq(0)
                     # latch value into output FIFO
                     m.d.sync += output_fifo.w_data.eq(interface.dat_r)
-                    m.d.sync += fifo.w_en.eq(1)
+                    m.d.sync += output_fifo.w_en.eq(1)
                     with m.If(read_inc):
-                        address.eq(address + 1)
+                        m.d.sync += address.eq(address + 1)
                     m.next = "IDLE"
                 
         # STEP 4: Return any read responses
@@ -316,12 +334,13 @@ class UDPTherbone(Elaboratable):
                     output_header[56:64].eq(output_count)
                 ]
             output_offset = Signal(range(64 // 8))
+        m.d.sync += output_fifo.r_en.eq(0)
         with m.FSM(name="respond"):
             with m.State("IDLE"):
                 with m.If(output_fifo.r_rdy):
                     m.d.sync += output_count.eq(output_fifo.r_data[:8])
                     m.d.sync += output_rff.eq(output_fifo.r_data[8])
-                    m.d.comb += output_fifo.r_en.eq(1)
+                    m.d.sync += output_fifo.r_en.eq(1)
                     m.d.sync += source.data.eq(output_header[:8])
                     m.d.sync += source.valid.eq(1)
                     m.d.sync += output_offset.eq(1)
@@ -329,50 +348,47 @@ class UDPTherbone(Elaboratable):
                     m.next = "HEADER"
             with m.State("HEADER"):
                 with m.If(source_we):
+                    m.d.sync += source.sop.eq(0)
                     m.d.sync += output_offset.eq(output_offset + 1)
                     m.d.sync += source.data.eq(output_header.word_select(output_offset, 8))
                     with m.If(output_offset == 0):
                         m.d.sync += source.valid.eq(output_fifo.r_rdy)
                         with m.If(output_fifo.r_rdy):
                             m.d.sync += output_value.eq(output_fifo.r_data)
-                        m.d.sync += source.data.eq(output_value.word_select((alignment // 8) - 1, 8))
-                        m.d.sync += output_offset.eq((alignment // 8) - 1)
-                        m.next = "ADDR"
+                            m.d.sync += output_fifo.r_en.eq(1)
+                            m.d.sync += source.data.eq(output_fifo.r_data.word_select((alignment // 8) - 1, 8))
+                            m.d.sync += output_offset.eq((alignment // 8) - 1)
+                            m.next = "ADDR"
             with m.State("ADDR"):
-                m.d.sync += source.valid.eq(output_fifo.r_rdy)
-                with m.If(output_fifo.r_rdy):
-                    m.d.sync += output_value.eq(output_fifo.r_data)
                 m.d.sync += source.data.eq(output_value.word_select(output_offset, 8))
                 with m.If(source_we):
                     m.d.sync += output_offset.eq(output_offset - 1)
-                    m.d.sync += source.data.eq(output_value.word_select(output_offset, 8))
+                    m.d.sync += source.data.eq(output_value.word_select(output_offset - 1, 8))
                     with m.If(output_offset == 0):
-                        m.d.comb += output_fifo.r_en.eq(1)
                         m.d.sync += source.valid.eq(output_fifo.r_rdy)
                         with m.If(output_fifo.r_rdy):
+                            m.d.sync += output_count.eq(output_count - 1)
                             m.d.sync += output_value.eq(output_fifo.r_data)
-                        m.d.sync += source.data.eq(output_value.word_select((alignment // 8) - 1, 8))
-                        m.d.sync += output_offset.eq((alignment // 8) - 1)
-                        m.next = "DATA"
+                            m.d.sync += output_fifo.r_en.eq(1)
+                            m.d.sync += source.data.eq(output_fifo.r_data.word_select((alignment // 8) - 1, 8))
+                            m.d.sync += output_offset.eq((alignment // 8) - 1)
+                            m.next = "DATA"
             with m.State("DATA"):
-                m.d.sync += source.valid.eq(output_fifo.r_rdy)
-                with m.If(output_fifo.r_rdy):
-                    m.d.sync += output_value.eq(output_fifo.r_data)
                 m.d.sync += source.data.eq(output_value.word_select(output_offset, 8))
                 with m.If(source_we):
                     m.d.sync += output_offset.eq(output_offset - 1)
-                    m.d.sync += source.data.eq(output_value.word_select(output_offset, 8))
+                    m.d.sync += source.data.eq(output_value.word_select(output_offset - 1, 8))
                     m.d.sync += source.eop.eq((output_offset == 1) & (output_count == 0))
                     with m.If(output_offset == 0):
                         with m.If(output_count > 0):
-                            m.d.comb += output_fifo.r_en.eq(1)
-                            m.d.sync += output_count.eq(output_count - 1)
                             m.d.sync += source.valid.eq(output_fifo.r_rdy)
                             with m.If(output_fifo.r_rdy):
+                                m.d.sync += output_count.eq(output_count - 1)
                                 m.d.sync += output_value.eq(output_fifo.r_data)
-                            m.d.sync += source.data.eq(output_value.word_select((alignment // 8) - 1, 8))
-                            m.d.sync += output_offset.eq((alignment // 8) - 1)
-                            m.next = "DATA"
+                                m.d.sync += output_fifo.r_en.eq(1)
+                                m.d.sync += source.data.eq(output_value.word_select((alignment // 8) - 1, 8))
+                                m.d.sync += output_offset.eq((alignment // 8) - 1)
+                                m.next = "DATA"
                         with m.Else():
                             m.next = "IDLE"
 
