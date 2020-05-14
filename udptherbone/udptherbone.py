@@ -180,7 +180,7 @@ class UDPTherbone(Elaboratable):
                         m.d.sync += fifo.w_en.eq(1)
                         m.d.sync += tcount.eq(tcount - 1)
                         m.d.sync += pad_count.eq((alignment//8)-1)
-                        with m.If(tcount == 0):
+                        with m.If(tcount - 1 == 0):
                             with m.If(sink.eop):
                                 m.next = "IDLE"
                             with m.Else():
@@ -227,7 +227,7 @@ class UDPTherbone(Elaboratable):
                     m.d.sync += value.eq(fifo.r_data)
                     m.d.sync += write_start.eq(1)
                     m.d.sync += write_count.eq(write_count - 1)
-                    with m.If(write_count == 0):
+                    with m.If(write_count - 1 == 0):
                         with m.If(read_count > 0):
                             m.next = "RADDR"
                         with m.Else():
@@ -246,7 +246,7 @@ class UDPTherbone(Elaboratable):
                     m.d.sync += value.eq(fifo.r_data)
                     m.d.sync += read_start.eq(1)
                     m.d.sync += read_count.eq(read_count - 1)
-                    with m.If(read_count == 0):
+                    with m.If(read_count - 1 == 0):
                         m.next = "IDLE"
                     
         # STEP 3: Do the Wishbone transactions

@@ -1,5 +1,6 @@
 
 from udptherbone.udptherbone import *
+from scapy.all import *
 
 def test_write_sim():
     import random
@@ -324,5 +325,137 @@ def test_read_sim():
     sim.add_sync_process(receive_proc)
     
     with sim.write_vcd("wb_rd.vcd", "wb_rd.gtkw"):
+        sim.run()
+
+def test_full_sim():
+    import random
+    from nmigen.back.pysim import Simulator, Passive
+    from ipaddress import IPv4Address
+    from udptherbone.slip import SLIPUnframer, SLIPFramer, slip_encode, slip_decode
+    from udptherbone.uart import UARTTx, UARTRx
+    
+    class Top(Elaboratable):
+        def __init__(self):
+            self.addr = Signal(32)
+            self.data = Signal(32, reset=0xCAFEBABE)
+            
+            host_addr = IPv4Address("127.0.0.1")
+            host_port = 2574
+            dest_addr = IPv4Address("127.0.0.2")
+            dest_port = 7777
+            self.i = i = StreamSource(Layout([("data", 8, DIR_FANOUT)]), name="input", sop=False, eop=False)
+            self.tx1 = tx1 = UARTTx(divisor = 4)
+            self.rx = rx = UARTRx(divisor = 4)
+            self.u = u = SLIPUnframer(rx.source)
+            self.d = d = UDPDepacketizer(u.source, dest_addr, port = dest_port)
+            self.wb = wb = UDPTherbone()
+            self.p = p = UDPPacketizer(wb.source, dest_addr, host_addr, source_port = dest_port, dest_port = host_port)
+            self.f = f = SLIPFramer(p.source)
+            self.tx = tx = UARTTx(divisor = 4)
+            self.rx1 = rx1 = UARTRx(divisor = 4)
+            self.o = o = rx1.source
+        
+        def elaborate(self, platform):
+            
+            m = Module()
+            
+            m.submodules.tx1 = self.tx1
+            m.submodules.rx = self.rx
+            m.submodules.u = self.u
+            m.submodules.d = self.d
+            m.submodules.wb = self.wb
+            m.submodules.p = self.p
+            m.submodules.f = self.f
+            m.submodules.tx = self.tx
+            m.submodules.rx1 = self.rx1
+            
+            m.d.comb += self.rx.rx_i.eq(self.tx1.tx_o)
+            m.d.comb += self.rx1.rx_i.eq(self.tx.tx_o)
+            
+            m.d.comb += self.tx1.sink.connect(self.i)
+            m.d.comb += self.tx.sink.connect(self.f.source)
+            
+            m.d.comb += self.wb.sink.connect(self.d.source)
+            
+            dut = self.wb
+            
+            addr = self.addr
+            
+            m.d.sync += dut.interface.ack.eq(0)
+            
+            with m.If(dut.interface.stb & dut.interface.cyc & dut.interface.we):
+                m.d.sync += addr.eq(dut.interface.adr)
+                m.d.sync += self.data.eq(dut.interface.dat_w)
+                m.d.sync += dut.interface.ack.eq(1)
+            
+            with m.If(dut.interface.stb & dut.interface.cyc & ~dut.interface.we):
+                m.d.sync += addr.eq(dut.interface.adr)
+                m.d.sync += dut.interface.dat_r.eq(self.data)
+                m.d.sync += dut.interface.ack.eq(1)
+            
+            return m
+    
+    addr = random.getrandbits(32)
+    data = random.getrandbits(32)
+    w_pkt = slip_encode(raw(IP(src='127.0.0.1', dst='127.0.0.2', flags='DF')/UDP(dport=7777, sport=2574)/eb_write(addr, [data])))
+    r_pkt = slip_encode(raw(IP(src='127.0.0.1', dst='127.0.0.2', flags='DF')/UDP(dport=7777, sport=2574)/eb_read(addr)))
+    
+    top = Top()
+    i = top.i
+    o = top.o
+    
+    read = Signal()
+
+    sim = Simulator(top)
+    sim.add_clock(1e-6)
+    
+    def transmit_proc():
+        yield
+        g = 0
+        while g < len(w_pkt):
+            c = w_pkt[g]
+            yield i.data.eq(c)
+            yield i.valid.eq(1)
+            yield
+            if (yield i.ready) == 1:
+                g += 1
+        yield
+        
+        g = 0
+        while g < len(r_pkt):
+            c = r_pkt[g]
+            yield i.data.eq(c)
+            yield i.valid.eq(1)
+            yield
+            if (yield i.ready) == 1:
+                g += 1
+        yield
+        
+    def receive_proc():
+        import struct
+        for g in range(0, 16):
+            yield
+        recv = bytearray()
+        yield o.ready.eq(1)
+        yield
+        while True:
+            if (yield o.valid) == 1:
+                recv.append((yield o.data))
+                if (yield o.data) == 0xc0:
+                    break
+            yield
+        yield
+        
+        print(list(map(hex, recv)))
+        i = IP(slip_decode(recv))
+        i.show()
+        print(list(map(hex, i.load)))
+        assert struct.unpack("!L", i.load[8:12])[0] == 0xdeadbeef
+        assert struct.unpack("!L", i.load[12:16])[0] == data
+        
+    sim.add_sync_process(transmit_proc)
+    sim.add_sync_process(receive_proc)
+    
+    with sim.write_vcd("wb_full.vcd", "wb_full.gtkw"):
         sim.run()
 
