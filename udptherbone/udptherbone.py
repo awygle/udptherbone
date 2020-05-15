@@ -22,7 +22,7 @@ def eb_write(addr, datas):
         
     return result
 
-def eb_read(addr):
+def eb_read(addrs):
     import struct
     
     magic = struct.pack("!H", 0x4E6F)
@@ -32,9 +32,12 @@ def eb_read(addr):
     counts = struct.pack("!H", 0x0001) # one read zero writes
     # 32-bit alignment yo
     ret_addr = struct.pack("!L", 0xDEADBEEF) # we're not gonna use this
-    addr = struct.pack("!L", addr)
+    return magic + flags + moreflags + counts + ret_addr
+    for addr in addrs:
+        a = struct.pack("!L", addr)
+        result += a
     
-    return magic + flags + moreflags + counts + ret_addr + addr
+    return result
 
 class UDPTherbone(Elaboratable):
     def __init__(self, mtu=1500, addr_width=32, data_width=32, granularity=8, features=["stall"]):

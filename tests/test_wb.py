@@ -191,7 +191,7 @@ def test_read_noret_sim():
     
     addr = random.getrandbits(32)
     #addr = 0xDEADBEEF
-    pkt = eb_read(addr)
+    pkt = eb_read([addr])
     
     top = Top()
     dut = top.dut
@@ -265,7 +265,7 @@ def test_read_sim():
     addr = random.getrandbits(32)
     print()
     print(hex(addr))
-    pkt = eb_read(addr)
+    pkt = eb_read([addr])
     
     data = random.getrandbits(32)
     #data = 0xBABECAFE
@@ -325,6 +325,104 @@ def test_read_sim():
     sim.add_sync_process(receive_proc)
     
     with sim.write_vcd("wb_rd.vcd", "wb_rd.gtkw"):
+        sim.run()
+
+def test_read_multi_sim():
+    import random
+    from nmigen.back.pysim import Simulator, Passive
+    
+    class Top(Elaboratable):
+        def __init__(self, datas):
+            self.dut = UDPTherbone()
+            self.read = Signal(range(len(datas)))
+            self.addr = Signal(32)
+            self.datas = datas
+            pass
+        
+        def elaborate(self, platform):
+            
+            m = Module()
+            
+            m.submodules.dut = dut = self.dut
+            
+            addr = self.addr
+            
+            m.d.sync += dut.interface.ack.eq(0)
+            
+            with m.If(dut.interface.stb & dut.interface.cyc & ~dut.interface.we):
+                m.d.sync += addr.eq(dut.interface.adr)
+                with m.Switch(self.read):
+                    for i in range(len(datas)):
+                        with m.Case(i):
+                            m.d.sync += dut.interface.dat_r.eq(self.datas[i])
+                m.d.sync += dut.interface.ack.eq(1)
+                m.d.sync += self.read.eq(self.read + 1)
+            
+            return m
+        
+    count = 5
+    
+    addrs = [random.getrandbits(32) for _ in range(count)]
+    print()
+    print(list(map(hex, addrs)))
+    pkts = [eb_read(addrs[i]) for i in range(count)]
+    
+    datas = [random.getrandbits(32) for _ in range(count)]
+    print(list(map(hex, datas)))
+    top = Top(datas)
+    dut = top.dut
+    i = top.dut.sink
+    o = top.dut.source
+
+    sim = Simulator(top)
+    sim.add_clock(1e-6)
+    
+    def transmit_proc():
+        yield
+        for pkt in pkts:
+            g = 0
+            while g < len(pkt):
+                c = pkt[g]
+                yield i.sop.eq(0)
+                yield i.eop.eq(0)
+                if g == 0:
+                    yield i.sop.eq(1)
+                if g == len(pkt)-1:
+                    yield i.eop.eq(1)
+                yield i.data.eq(c)
+                yield i.valid.eq(1)
+                yield
+                if (yield i.ready) == 1:
+                    g += 1
+            print("sent pkt")
+        
+    def receive_proc():
+        import struct
+        for g in range(0, 16):
+            yield
+        recv = bytearray()
+        yield o.ready.eq(1)
+        yield
+        recv = [bytearray() for _ in range(count)]
+        for g in range(count):
+            while not (yield o.sop):
+                yield
+            while not (yield o.eop):
+                if (yield o.valid) == 1:
+                    recv[g].append((yield o.data))
+                yield
+            if (yield o.valid) == 1:
+                recv[g].append((yield o.data))
+        
+        for g in range(count):
+            print(list(map(hex, recv[g])))
+            assert struct.unpack("!L", recv[g][8:12])[0] == 0xdeadbeef
+            assert struct.unpack("!L", recv[g][12:16])[0] == datas[g]
+        
+    sim.add_sync_process(transmit_proc)
+    sim.add_sync_process(receive_proc)
+    
+    with sim.write_vcd("wb_rd_multi.vcd", "wb_rd_multi.gtkw"):
         sim.run()
 
 def test_full_sim():
@@ -398,7 +496,7 @@ def test_full_sim():
     addr = random.getrandbits(32)
     data = random.getrandbits(32)
     w_pkt = slip_encode(raw(IP(src='127.0.0.1', dst='127.0.0.2', flags='DF')/UDP(dport=7777, sport=2574)/eb_write(addr, [data])))
-    r_pkt = slip_encode(raw(IP(src='127.0.0.1', dst='127.0.0.2', flags='DF')/UDP(dport=7777, sport=2574)/eb_read(addr)))
+    r_pkt = slip_encode(raw(IP(src='127.0.0.1', dst='127.0.0.2', flags='DF')/UDP(dport=7777, sport=2574)/eb_read([addr])))
     
     top = Top()
     i = top.i
