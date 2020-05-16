@@ -496,7 +496,7 @@ def test_full_sim():
     addr = random.getrandbits(32)
     data = random.getrandbits(32)
     w_pkt = slip_encode(raw(IP(src='127.0.0.1', dst='127.0.0.2', flags='DF')/UDP(dport=7777, sport=2574)/eb_write(addr, [data])))
-    r_pkt = slip_encode(raw(IP(src='127.0.0.1', dst='127.0.0.2', flags='DF')/UDP(dport=7777, sport=2574)/eb_read([addr])))
+    r_pkt = slip_encode(raw(IP(src='127.0.0.1', dst='127.0.0.2', flags='DF')/UDP(dport=7777, sport=2574)/eb_read(addr)))
     
     top = Top()
     i = top.i
