@@ -32,7 +32,7 @@ def eb_read(addrs):
     counts = struct.pack("!H", 0x0001) # one read zero writes
     # 32-bit alignment yo
     ret_addr = struct.pack("!L", 0xDEADBEEF) # we're not gonna use this
-    return magic + flags + moreflags + counts + ret_addr
+    result = magic + flags + moreflags + counts + ret_addr
     for addr in addrs:
         a = struct.pack("!L", addr)
         result += a
@@ -393,6 +393,7 @@ class UDPTherbone(Elaboratable):
                                 m.d.sync += output_offset.eq((alignment // 8) - 1)
                                 m.next = "DATA"
                         with m.Else():
+                            m.d.sync += source.valid.eq(0)
                             m.next = "IDLE"
 
         return m
