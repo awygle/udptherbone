@@ -12,7 +12,7 @@ def eb_write(addr, datas):
     flags = struct.pack("!H", 0x1444) # no reads, 32-bit address, 32-bit data
     # 32-bit alignment yo
     moreflags = struct.pack("!H", 0x08FF) # CYC (end of cycle), use all byte enable bits
-    counts = struct.pack("!H", 0x0100) # one write zero reads
+    counts = struct.pack("!H", len(datas) << 8) # len writes zero reads
     # 32-bit alignment yo
     addr = struct.pack("!L", addr)
     result = magic + flags + moreflags + counts + addr 
@@ -29,7 +29,7 @@ def eb_read(addrs):
     flags = struct.pack("!H", 0x1044) # 32-bit address, 32-bit data
     # 32-bit alignment yo
     moreflags = struct.pack("!H", 0x08FF) # CYC (end of cycle), use all byte enable bits
-    counts = struct.pack("!H", 0x0001) # one read zero writes
+    counts = struct.pack("!H", len(addrs)) # one read zero writes
     # 32-bit alignment yo
     ret_addr = struct.pack("!L", 0xDEADBEEF) # we're not gonna use this
     result = magic + flags + moreflags + counts + ret_addr
@@ -56,8 +56,8 @@ class UDPTherbone(Elaboratable):
         source = self.source
         sink_we = Signal()
         m.d.comb += sink_we.eq(sink.valid & sink.ready)
-        source_we = Signal()
-        m.d.comb += source_we.eq(source.valid & source.ready)
+        source_re = Signal()
+        m.d.comb += source_re.eq(source.valid & source.ready)
         interface = self.interface
         
         # STEP 1: Capture the packet input
@@ -345,56 +345,77 @@ class UDPTherbone(Elaboratable):
                     m.d.sync += output_rff.eq(output_fifo.r_data[8])
                     m.d.sync += output_fifo.r_en.eq(1)
                     m.d.sync += source.data.eq(output_header[:8])
-                    m.d.sync += source.valid.eq(1)
                     m.d.sync += output_offset.eq(1)
                     m.d.sync += source.sop.eq(1)
                     m.next = "HEADER"
             with m.State("HEADER"):
-                with m.If(source_we):
-                    m.d.sync += source.sop.eq(0)
-                    m.d.sync += output_offset.eq(output_offset + 1)
-                    m.d.sync += source.data.eq(output_header.word_select(output_offset, 8))
-                    with m.If(output_offset == 0):
-                        m.d.sync += source.valid.eq(output_fifo.r_rdy)
-                        with m.If(output_fifo.r_rdy):
-                            m.d.sync += output_value.eq(output_fifo.r_data)
-                            m.d.sync += output_fifo.r_en.eq(1)
-                            m.d.sync += source.data.eq(output_fifo.r_data.word_select((alignment // 8) - 1, 8))
-                            m.d.sync += output_offset.eq((alignment // 8) - 1)
-                            m.next = "ADDR"
+                # reads are allowed in two cases - we have an output_offset already, or there's a word in the FIFO
+                m.d.comb += source.valid.eq((output_offset > 0) | output_fifo.r_rdy)
+
+                # on a read
+                with m.If(source_re):
+                    # if we still have bytes
+                    with m.If(output_offset != 0):
+                        # advance to the next byte
+                        m.d.sync += source.sop.eq(0)
+                        m.d.sync += output_offset.eq(output_offset + 1)
+                        m.d.sync += source.data.eq(output_header.word_select(output_offset, 8))
+                    # if we're out of bytes
+                    with m.Else():
+                        # then the FIFO is ready (see condition above) so advance state
+                        m.d.sync += output_value.eq(output_fifo.r_data)
+                        m.d.sync += output_fifo.r_en.eq(1)
+                        m.d.sync += source.data.eq(output_fifo.r_data.word_select((alignment // 8) - 1, 8))
+                        m.d.sync += output_offset.eq((alignment // 8) - 1)
+                        m.next = "ADDR"
             with m.State("ADDR"):
-                m.d.sync += source.data.eq(output_value.word_select(output_offset, 8))
-                with m.If(source_we):
-                    m.d.sync += output_offset.eq(output_offset - 1)
-                    m.d.sync += source.data.eq(output_value.word_select(output_offset - 1, 8))
-                    with m.If(output_offset == 0):
-                        m.d.sync += source.valid.eq(output_fifo.r_rdy)
-                        with m.If(output_fifo.r_rdy):
+                # reads are allowed in two cases - we have an output_offset still, or there's a word in the FIFO
+                m.d.comb += source.valid.eq((output_offset > 0) | output_fifo.r_rdy)
+                
+                # on a read
+                with m.If(source_re):
+                    # if we still have bytes
+                    with m.If(output_offset != 0):
+                        # advance to the next byte
+                        m.d.sync += output_offset.eq(output_offset - 1)
+                        m.d.sync += source.data.eq(output_value.word_select(output_offset - 1, 8))
+                    # if we're out of bytes
+                    with m.Else():
+                        # then the FIFO is ready (see condition above) so advance state
+                        m.d.sync += output_count.eq(output_count - 1)
+                        m.d.sync += output_value.eq(output_fifo.r_data)
+                        m.d.sync += output_fifo.r_en.eq(1)
+                        m.d.sync += source.data.eq(output_fifo.r_data.word_select((alignment // 8) - 1, 8))
+                        m.d.sync += output_offset.eq((alignment // 8) - 1)
+                        m.next = "DATA"
+            with m.State("DATA"):
+                # reads are allowed in three cases - we have an output_offset still, or there's a word in the FIFO, or we're done
+                m.d.comb += source.valid.eq((output_offset > 0) | (output_count == 0) | output_fifo.r_rdy)
+                
+                # on a read
+                with m.If(source_re):
+                    # if we still have bytes
+                    with m.If(output_offset != 0):
+                        # advance to the next byte
+                        m.d.sync += output_offset.eq(output_offset - 1)
+                        m.d.sync += source.data.eq(output_value.word_select(output_offset - 1, 8))
+                        m.d.sync += source.eop.eq((output_offset == 1) & (output_count == 0))
+                    # if we're out of bytes
+                    with m.Else():
+                        # if we don't need any more words, go back to idle
+                        with m.If(output_count == 0):
+                            m.d.sync += source.eop.eq(0)
+                            m.next = "IDLE"
+                        # if we still need more words
+                        with m.Else():
+                            # then the FIFO is ready (see condition above)
+                            # advance to the next word
                             m.d.sync += output_count.eq(output_count - 1)
                             m.d.sync += output_value.eq(output_fifo.r_data)
                             m.d.sync += output_fifo.r_en.eq(1)
-                            m.d.sync += source.data.eq(output_fifo.r_data.word_select((alignment // 8) - 1, 8))
+                            m.d.sync += source.data.eq(output_value.word_select((alignment // 8) - 1, 8))
                             m.d.sync += output_offset.eq((alignment // 8) - 1)
                             m.next = "DATA"
-            with m.State("DATA"):
-                m.d.sync += source.data.eq(output_value.word_select(output_offset, 8))
-                with m.If(source_we):
-                    m.d.sync += output_offset.eq(output_offset - 1)
-                    m.d.sync += source.data.eq(output_value.word_select(output_offset - 1, 8))
-                    m.d.sync += source.eop.eq((output_offset == 1) & (output_count == 0))
-                    with m.If(output_offset == 0):
-                        with m.If(output_count > 0):
-                            m.d.sync += source.valid.eq(output_fifo.r_rdy)
-                            with m.If(output_fifo.r_rdy):
-                                m.d.sync += output_count.eq(output_count - 1)
-                                m.d.sync += output_value.eq(output_fifo.r_data)
-                                m.d.sync += output_fifo.r_en.eq(1)
-                                m.d.sync += source.data.eq(output_value.word_select((alignment // 8) - 1, 8))
-                                m.d.sync += output_offset.eq((alignment // 8) - 1)
-                                m.next = "DATA"
-                        with m.Else():
-                            m.d.sync += source.valid.eq(0)
-                            m.next = "IDLE"
 
         return m
 

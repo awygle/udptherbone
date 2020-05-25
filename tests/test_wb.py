@@ -327,6 +327,112 @@ def test_read_sim():
     with sim.write_vcd("wb_rd.vcd", "wb_rd.gtkw"):
         sim.run()
 
+def test_read_delay_sim():
+    import random
+    from nmigen.back.pysim import Simulator, Passive
+    
+    class Top(Elaboratable):
+        def __init__(self, data):
+            self.dut = UDPTherbone()
+            self.done = Signal()
+            self.addr = Signal(32)
+            self.data = data
+            pass
+        
+        def elaborate(self, platform):
+            
+            m = Module()
+            
+            m.submodules.dut = dut = self.dut
+            
+            addr = self.addr
+            done = self.done
+            
+            counter = Signal(3)
+            
+            m.d.sync += dut.interface.ack.eq(0)
+            
+            with m.If(dut.interface.stb & dut.interface.cyc & ~dut.interface.we):
+                m.d.sync += counter.eq(1)
+                m.d.sync += addr.eq(dut.interface.adr)
+            
+            with m.If(counter > 0):
+                m.d.sync += counter.eq(counter + 1)
+            
+            with m.If(counter == 4):
+                m.d.sync += dut.interface.dat_r.eq(self.data)
+                m.d.sync += dut.interface.ack.eq(1)
+                m.d.sync += done.eq(1)
+            
+            return m
+    
+    addr = random.getrandbits(32)
+    print()
+    print(hex(addr))
+    pkt = eb_read([addr])
+    
+    data = random.getrandbits(32)
+    #data = 0xBABECAFE
+    print(hex(data))
+    top = Top(data)
+    dut = top.dut
+    i = top.dut.sink
+    o = top.dut.source
+
+    sim = Simulator(top)
+    sim.add_clock(1e-6)
+    
+    def transmit_proc():
+        yield
+        g = 0
+        while g < len(pkt):
+            c = pkt[g]
+            if g == 0:
+                yield i.sop.eq(1)
+            elif g == len(pkt)-1:
+                yield i.eop.eq(1)
+            else:
+                yield i.sop.eq(0)
+                yield i.eop.eq(0)
+            yield i.data.eq(c)
+            yield i.valid.eq(1)
+            yield
+            if (yield i.ready) == 1:
+                g += 1
+        while not (yield top.done):
+            yield i.eop.eq(0)
+            yield i.valid.eq(0)
+            yield
+        yield
+        
+        print("tx done")
+        
+        assert (yield top.addr) == addr
+        
+    def receive_proc():
+        import struct
+        for g in range(0, 16):
+            yield
+        recv = bytearray()
+        yield o.ready.eq(1)
+        yield
+        while not (yield o.eop):
+            if (yield o.valid) == 1:
+                recv.append((yield o.data))
+            yield
+        if (yield o.valid) == 1:
+            recv.append((yield o.data))
+        yield
+        
+        assert struct.unpack("!L", recv[8:12])[0] == 0xdeadbeef
+        assert struct.unpack("!L", recv[12:16])[0] == data
+        
+    sim.add_sync_process(transmit_proc)
+    sim.add_sync_process(receive_proc)
+    
+    with sim.write_vcd("wb_rd_dly.vcd", "wb_rd_dly.gtkw"):
+        sim.run()
+
 def test_read_multi_sim():
     import random
     from nmigen.back.pysim import Simulator, Passive
@@ -496,7 +602,7 @@ def test_full_sim():
     addr = random.getrandbits(32)
     data = random.getrandbits(32)
     w_pkt = slip_encode(raw(IP(src='127.0.0.1', dst='127.0.0.2', flags='DF')/UDP(dport=7777, sport=2574)/eb_write(addr, [data])))
-    r_pkt = slip_encode(raw(IP(src='127.0.0.1', dst='127.0.0.2', flags='DF')/UDP(dport=7777, sport=2574)/eb_read(addr)))
+    r_pkt = slip_encode(raw(IP(src='127.0.0.1', dst='127.0.0.2', flags='DF')/UDP(dport=7777, sport=2574)/eb_read([addr])))
     
     top = Top()
     i = top.i
