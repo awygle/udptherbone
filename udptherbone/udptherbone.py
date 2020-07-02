@@ -305,7 +305,7 @@ class UDPTherbone(Elaboratable):
                     m.next = "IDLE"
                 with m.Elif(interface.err):
                     m.d.sync += [
-                            interace.cyc.eq(0),
+                            interface.cyc.eq(0),
                             interface.stb.eq(0),
                         ]
                     with m.If(read_inc):
