@@ -280,7 +280,7 @@ class UDPTherbone(Elaboratable):
                 if "stall" in self._features:
                     m.d.sync += interface.stb.eq(0)
                     m.d.sync += interface.we.eq(0)
-                with m.If(interface.ack):
+                with m.If(interface.ack | interface.err):
                     # drop cyc, and also stb and we if not dropped earlier
                     m.d.sync += interface.cyc.eq(0)
                     m.d.sync += interface.stb.eq(0)
@@ -300,6 +300,14 @@ class UDPTherbone(Elaboratable):
                     # latch value into output FIFO
                     m.d.sync += output_fifo.w_data.eq(interface.dat_r)
                     m.d.sync += output_fifo.w_en.eq(1)
+                    with m.If(read_inc):
+                        m.d.sync += address.eq(address + 1)
+                    m.next = "IDLE"
+                with m.Elif(interface.err):
+                    m.d.sync += [
+                            interace.cyc.eq(0),
+                            interface.stb.eq(0),
+                        ]
                     with m.If(read_inc):
                         m.d.sync += address.eq(address + 1)
                     m.next = "IDLE"
