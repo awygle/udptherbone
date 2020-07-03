@@ -75,6 +75,7 @@ class UDPTherbone(Elaboratable):
             m.submodules.fifo = fifo = SyncFIFOBuffered(width=alignment+2, depth=self._mtu)
         else:
             m.submodules.fifo = fifo = SyncFIFOBuffered(width=alignment, depth=self._mtu)
+            print(fifo.r_data.shape())
         m.d.comb += sink.ready.eq(fifo.w_rdy)
         m.d.sync += fifo.w_en.eq(0)
         with m.FSM(name="capture"):
@@ -255,6 +256,8 @@ class UDPTherbone(Elaboratable):
         # STEP 3: Do the Wishbone transactions
         # This is very sub-optimal from a throughput perspective but honestly, who cares
         response = Signal(self._data_width)
+        print(address.shape())
+        print(interface.adr.shape())
         with m.FSM(name="wishbone"):
             with m.State("IDLE"):
                 with m.If(write_start):
@@ -293,21 +296,16 @@ class UDPTherbone(Elaboratable):
                 # if pipelined, drop strobe
                 if "stall" in self._features:
                     m.d.sync += interface.stb.eq(0)
-                with m.If(interface.ack):
+                with m.If(interface.ack | interface.err):
                     # drop cyc, and also stb if not dropped earlier
                     m.d.sync += interface.cyc.eq(0)
                     m.d.sync += interface.stb.eq(0)
                     # latch value into output FIFO
-                    m.d.sync += output_fifo.w_data.eq(interface.dat_r)
+                    with m.If(interface.ack):
+                        m.d.sync += output_fifo.w_data.eq(interface.dat_r)
+                    with m.Else():
+                        m.d.sync += output_fifo.w_data.eq(0xDEADDEAD)
                     m.d.sync += output_fifo.w_en.eq(1)
-                    with m.If(read_inc):
-                        m.d.sync += address.eq(address + 1)
-                    m.next = "IDLE"
-                with m.Elif(interface.err):
-                    m.d.sync += [
-                            interface.cyc.eq(0),
-                            interface.stb.eq(0),
-                        ]
                     with m.If(read_inc):
                         m.d.sync += address.eq(address + 1)
                     m.next = "IDLE"
